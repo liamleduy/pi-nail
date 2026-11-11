@@ -1,0 +1,18 @@
+{
+  "name": "pi-nail",
+  "version": "0.1.0",
+  "description": "pi extension: /nail turns a rough prompt into a good one via a hidden side conversation",
+  "keywords": ["pi-package", "pi-extension", "pi", "prompt", "prompt-engineering"],
+  "license": "MIT",
+  "author": "lalalkila <duylam.lee@gmail.com>",
+  "type": "module",
+  "files": ["extensions", "templates", "README.md", "LICENSE", "CHANGELOG.md"],
+  "pi": { "extensions": ["./extensions/nail/index.ts"] },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "publishConfig": { "access": "public" }
+}

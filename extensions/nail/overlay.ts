@@ -12,7 +12,7 @@ const HISTORY_KEY = "ctrl+o"; // ctrl+h = backspace in legacy terminals, ctrl+v 
 
 type Mode = "chat" | "draft" | "actions"; // tab cycles chat → draft → actions → chat
 const MODES: Mode[] = ["chat", "draft", "actions"];
-const MODE_RIM: Record<Mode, ThemeColor> = { chat: "accent", draft: "success", actions: "muted" };
+const MODE_RIM: Record<Mode, ThemeColor> = { chat: "accent", draft: "success", actions: "warning" }; // warning = the theme's amber/orange token;
 
 const ACTIONS: { id: Action; label: string }[] = [
 	{ id: "send", label: "Send" },
@@ -48,7 +48,7 @@ export class NailOverlay implements Focusable {
 		this.pane = new DraftPane(theme, this.versions);
 		this.editor = new Editor(tui, { borderColor: (s) => theme.fg("border", s), selectList: getSelectListTheme() });
 		this.editor.onSubmit = (text) => this.submit(text);
-		this.draftEditor = new Editor(tui, { borderColor: (s) => theme.fg("accent", s), selectList: getSelectListTheme() });
+		this.draftEditor = new Editor(tui, { borderColor: (s) => theme.fg("border", s), selectList: getSelectListTheme() }); // body only; neutral border, its rules are replaced by the draft box
 		this.draftEditor.disableSubmit = true; // return inserts a newline while editing a draft
 		this.unsub = session.subscribe((e: any) => this.onEvent(e));
 		this.submit(`Rough prompt:\n\n${roughPrompt}`);
@@ -180,9 +180,31 @@ export class NailOverlay implements Focusable {
 		}
 	}
 
-	/** Rim color for the overlay's top/bottom border lines: the focused mode's color, or neutral when unfocused. */
-	private rim(width: number) {
-		return this.theme.fg(this.focused ? MODE_RIM[this.mode] : "border", "─".repeat(width));
+	/** Overlay frame (outer top/bottom/side edges): always neutral — the pane boxes, input editor and action bar carry the focus colors. */
+	private frame(width: number, left: string, right: string, title = "") {
+		const head = title ? truncateToWidth(this.theme.fg("border", "─ ") + title + " ", Math.max(0, width - 2), "…") : "";
+		return this.theme.fg("border", left) + head + this.theme.fg("border", "─".repeat(Math.max(0, width - 2 - visibleWidth(head))) + right);
+	}
+
+	/** Neutral side edges around one full-width row (editor, action bar, hint). */
+	private side(content: string, width: number) {
+		const edge = this.theme.fg("border", "│");
+		return edge + truncateToWidth(content, width - 2, "", true) + edge;
+	}
+
+	/** Closed box of `width` columns around `rows`; border + header take `color`. The header is always drawn, so it can't vanish. */
+	private box(title: string, right: string, color: ThemeColor, rows: string[], width: number) {
+		const c = (s: string) => this.theme.fg(color, s);
+		const iw = Math.max(0, width - 2);
+		const r = right ? truncateToWidth(right, Math.max(0, iw - 4)) + " " : "";
+		const head = truncateToWidth(`─ ${title} `, Math.max(0, iw - visibleWidth(r)), "…");
+		const top = c("╭" + head + "─".repeat(Math.max(0, iw - visibleWidth(head) - visibleWidth(r))) + r + "╮");
+		return [top, ...rows.map((l) => c("│") + truncateToWidth(l, iw, "", true) + c("│")), c("╰" + "─".repeat(iw) + "╯")];
+	}
+
+	/** Chrome color (border/title) of a pane: the mode's rim color when it holds focus, neutral border otherwise. */
+	private paneColor(pane: Mode): ThemeColor {
+		return this.mode === pane ? MODE_RIM[pane] : "border";
 	}
 
 	invalidate() { this.editor.invalidate(); this.draftEditor.invalidate(); }
@@ -190,16 +212,23 @@ export class NailOverlay implements Focusable {
 	render(width: number): string[] {
 		const theme = this.theme;
 		const wide = width >= WIDE_MIN;
-		const colW = wide ? Math.floor((width - 1) * 0.55) : width;
-		const paneW = width - colW - 1;
+		const colW = wide ? Math.floor(width * 0.55) : width; // chat box; the draft box takes the rest, side by side
+		const paneW = width - colW;
 		const inner = Math.max(20, colW - 4);
 		const rows = process.stdout.rows || 40;
 		const editDraft = this.draftEditing && !this.pane.isHistoryOpen;
-		let draftLines: string[] | undefined; // narrow: pre-rendered draft editor, sizes the chat column
-		if (!wide && editDraft) draftLines = this.draftEditor.render(width);
+		// per-pane focus: the pane boxes / action bar carry the color; both editors keep a neutral border
+		this.editor.focused = this.focused && this.mode === "chat";
+		this.editor.borderColor = (s) => theme.fg("border", s);
+		this.draftEditor.focused = this.focused && editDraft;
+		this.draftEditor.borderColor = (s) => theme.fg("border", s);
+		// editor body without its own top/bottom rules: the box and its header replace them
+		const editorRows = (w: number) => this.draftEditor.render(w - 2).slice(1, -1);
+		let draftLines: string[] | undefined; // narrow: pre-rendered draft editor body, sizes the chat column
+		if (!wide && editDraft) draftLines = editorRows(width);
 		const bodyH = wide
-			? Math.max(8, Math.floor(rows * 0.85) - 12)
-			: Math.max(6, Math.floor(rows * 0.85) - 15 - (draftLines ? draftLines.length : this.draft ? Math.min(10, this.draft.split("\n").length + 2) : 0));
+			? Math.max(8, Math.floor(rows * 0.85) - 14)
+			: Math.max(6, Math.floor(rows * 0.85) - 17 - (draftLines ? draftLines.length + 2 : this.draft ? Math.min(10, this.draft.split("\n").length) + 2 : 0));
 
 		const lines: string[] = [];
 		const renderMarkdown = (s: string) => new Markdown(s, 0, 0, getMarkdownTheme()).render(inner);
@@ -220,55 +249,53 @@ export class NailOverlay implements Focusable {
 
 		const out: string[] = [];
 		const more = [this.scroll < maxScroll ? "↑ more" : "", this.scroll > 0 ? "↓ more" : ""].filter(Boolean).join(" ");
-		const left = ` ${theme.fg("accent", "◆ nail")} ${theme.fg(this.mode === "chat" ? "accent" : "dim", "· side chat, hidden from main agent")}`;
-		const right = more ? theme.fg("muted", more) + " " : "";
-		const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
-		out.push(this.rim(width));
-		out.push(visibleWidth(left) + visibleWidth(right) + 1 > width ? truncateToWidth(left, width - visibleWidth(right) - 1) + " " + right : left + " ".repeat(gap) + right);
-		const chat = view.map((l) => " " + truncateToWidth(l, inner + 2));
+		out.push(this.frame(width, "╭", "╮", `${theme.fg("accent", "◆ nail")} ${theme.fg("dim", "· side chat, hidden from main agent")}`));
+		const chat = this.box("chat", more, this.paneColor("chat"), view.map((l) => " " + truncateToWidth(l, inner + 2)), colW);
+		const draftTitle = (scroll: boolean) => this.pane.title(scroll);
+		const draftBox = (body: string[], w: number, scroll: boolean) => this.box(draftTitle(scroll), "", this.paneColor("draft"), body, w);
 		if (wide) {
-			let pane: string[];
-			if (editDraft) pane = this.draftEditor.render(paneW);
-			else {
+			let draftBody: string[];
+			if (editDraft) { // header stays (drawn by the box); editor fills the body
+				draftBody = editorRows(paneW).slice(0, bodyH);
+				while (draftBody.length < bodyH) draftBody.push("");
+			} else {
 				this.pane.height = bodyH;
-				pane = this.pane.render(paneW);
+				draftBody = this.pane.render(paneW - 2);
 			}
-			const sep = theme.fg("border", "│");
-			for (let i = 0; i < bodyH; i++) {
-				const l = truncateToWidth(chat[i] ?? "", colW);
-				out.push(l + " ".repeat(Math.max(0, colW - visibleWidth(l))) + sep + (pane[i] ?? ""));
-			}
+			const right = draftBox(draftBody, paneW, !editDraft);
+			for (let i = 0; i < chat.length; i++) out.push(chat[i]! + (right[i] ?? ""));
 		} else out.push(...chat);
 
 		if (!wide && this.pane.isHistoryOpen) {
 			this.pane.height = 8;
-			out.push(...this.pane.render(width));
+			out.push(...draftBox(this.pane.render(width - 2), width, true));
 		} else if (!wide && draftLines) {
-			out.push(...draftLines);
+			out.push(...draftBox(draftLines, width, false));
 		} else if (!wide && this.draft) {
-			out.push(theme.fg("success", "─ draft prompt " + "─".repeat(Math.max(0, width - 15))));
-			out.push(...new Markdown(this.draft, 1, 0, getMarkdownTheme()).render(width - 2).slice(0, 10));
+			out.push(...draftBox(new Markdown(this.draft, 1, 0, getMarkdownTheme()).render(width - 2).slice(0, 10), width, false));
 		}
-		out.push(this.rim(width));
-		// focus indicators: accent the focused region's border/title
-		this.editor.focused = this.focused && this.mode === "chat";
-		this.editor.borderColor = (s) => theme.fg(this.mode === "chat" ? "accent" : "border", s);
-		this.draftEditor.focused = this.focused && editDraft;
-		this.pane.focused = this.mode === "draft";
-		out.push(...this.editor.render(width));
+		out.push(...this.editor.render(width - 2).map((l) => this.side(l, width))); // editor's own top/bottom border separates transcript from input
 
+		const barFocus = this.mode === "actions";
+		// ""-valued selectedBg (e.g. the system theme before the terminal reports colors) makes bg() emit a
+		// bare 49 reset — an invisible highlight. Detect that and fall back to inverse video.
+		const hasSelectionBg = theme.getBgAnsi("selectedBg") !== "\x1b[49m";
 		const actionBar = ACTIONS.map((action, i) => {
 			const disabled = action.id !== "discard" && !this.draft;
 			const label = ` ${action.label} `;
-			if (this.mode === "actions" && i === this.selectedActionIndex) return theme.bg("selectedBg", disabled ? theme.fg("dim", label) : theme.fg("accent", label));
+			if (barFocus && i === this.selectedActionIndex) // visible selection: selectedBg panel, or inverse video when that token is a no-op
+				return hasSelectionBg
+					? theme.style(label, { fg: disabled ? "dim" : MODE_RIM.actions, bg: "selectedBg", bold: true })
+					: theme.style(label, { fg: disabled ? "dim" : MODE_RIM.actions, inverse: true, bold: true });
 			return disabled ? theme.fg("dim", label) : theme.fg("muted", label);
 		}).join(" ");
+		const cycle = `tab cycle focus (${MODES.map((m) => theme.fg(m === this.mode ? MODE_RIM[m] : "dim", m)).join("|")})`;
 		const hint = this.pane.isHistoryOpen
-			? `↑/↓ select · enter preview · esc back · ${HISTORY_KEY} close · tab cycle focus`
-			: `tab cycle focus (chat|draft|actions) · ${this.mode === "actions" ? "←/→ enter choose" : this.mode === "chat" ? "↑/↓ scroll, type to chat" : "↑/↓ edit draft"} · ${HISTORY_KEY} history · esc ${this.busy ? "stop" : this.mode === "draft" ? "back" : "discard"}`;
-		out.push(` ${actionBar}`);
-		out.push(" " + theme.fg("dim", truncateToWidth(hint, width - 2, "…")));
-		out.push(this.rim(width));
+			? `↑/↓ select · enter preview · esc back · ${HISTORY_KEY} close · ${cycle}`
+			: `${cycle} · ${this.mode === "actions" ? "←/→ enter choose" : this.mode === "chat" ? "↑/↓ scroll, type to chat" : "↑/↓ edit draft"} · ${HISTORY_KEY} history · esc ${this.busy ? "stop" : this.mode === "draft" ? "back" : "discard"}`;
+		out.push(this.side(` ${actionBar}`, width));
+		out.push(this.side(" " + theme.fg("dim", truncateToWidth(hint, width - 4, "…")), width));
+		out.push(this.frame(width, "╰", "╯"));
 		// solid background: pad every line so the main chat does not bleed through
 		return out.map((l) => truncateToWidth(l, width) + " ".repeat(Math.max(0, width - visibleWidth(l))));
 	}

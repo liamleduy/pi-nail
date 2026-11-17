@@ -10,6 +10,9 @@ export interface Result { action: Action; final?: string; transcript: Block[]; v
 const WIDE_MIN = 100; // overlay width at which the draft pane goes on the right
 const HISTORY_KEY = "ctrl+o"; // ctrl+h = backspace in legacy terminals, ctrl+v = paste
 
+type Mode = "chat" | "draft" | "actions"; // tab cycles chat → draft → actions → chat
+const MODES: Mode[] = ["chat", "draft", "actions"];
+
 const ACTIONS: { id: Action; label: string }[] = [
 	{ id: "send", label: "Send" },
 	{ id: "chat", label: "Put to chat" },
@@ -25,7 +28,10 @@ export class NailOverlay implements Focusable {
 	private streaming = "";
 	private busy = true;
 	private scroll = 0; // lines up from bottom
-	private mode: "editor" | "bar" = "editor";
+	private mode: Mode = "chat";
+	private draftEditor: Editor;
+	private draftEditing = false;
+	private draftEditIndex = 0; // versions[] index loaded into the draft editor
 	private selectedActionIndex = 0;
 	private editor: Editor;
 	private unsub: () => void;
@@ -41,6 +47,8 @@ export class NailOverlay implements Focusable {
 		this.pane = new DraftPane(theme, this.versions);
 		this.editor = new Editor(tui, { borderColor: (s) => theme.fg("border", s), selectList: getSelectListTheme() });
 		this.editor.onSubmit = (text) => this.submit(text);
+		this.draftEditor = new Editor(tui, { borderColor: (s) => theme.fg("accent", s), selectList: getSelectListTheme() });
+		this.draftEditor.disableSubmit = true; // return inserts a newline while editing a draft
 		this.unsub = session.subscribe((e: any) => this.onEvent(e));
 		this.submit(`Rough prompt:\n\n${roughPrompt}`);
 	}
@@ -85,7 +93,31 @@ export class NailOverlay implements Focusable {
 		this.tui.requestRender();
 	}
 
+	/** Load the shown draft version into the draft editor for in-place editing. */
+	private enterDraft() {
+		this.draftEditIndex = Math.min(this.pane.shown, this.versions.length - 1);
+		this.draftEditor.setText(this.versions[this.draftEditIndex]?.text ?? "");
+		this.draftEditing = true;
+	}
+
+	/** Write the edited text back into the version it came from (and this.draft when it is the latest). */
+	private commitDraft() {
+		if (!this.draftEditing) return;
+		this.draftEditing = false;
+		const idx = Math.min(this.draftEditIndex, this.versions.length - 1);
+		this.versions[idx]!.text = this.draftEditor.getText();
+		if (idx === this.versions.length - 1) this.draft = this.draftEditor.getText();
+	}
+
+	private setMode(mode: Mode) {
+		if (mode !== "draft") this.commitDraft();
+		this.mode = mode;
+		if (mode === "draft") this.enterDraft();
+		this.tui.requestRender();
+	}
+
 	private finish(action: Action) {
+		this.commitDraft();
 		this.unsub();
 		this.done({ action, final: this.draft || undefined, transcript: this.blocks, versions: this.versions });
 	}
@@ -104,8 +136,19 @@ export class NailOverlay implements Focusable {
 			this.tui.requestRender();
 			return; // history view swallows input
 		}
-		if (matchesKey(data, "pageUp") || matchesKey(data, "pageDown")) {
-			this.pane.scrollBy(matchesKey(data, "pageUp") ? -5 : 5);
+		if (matchesKey(data, "tab") || matchesKey(data, "shift+tab")) {
+			const delta = matchesKey(data, "tab") ? 1 : -1;
+			this.setMode(MODES[(MODES.indexOf(this.mode) + delta + MODES.length) % MODES.length]!);
+			return;
+		}
+		if (this.mode === "draft") {
+			if (matchesKey(data, "escape")) { // exit the edit, keep the text, back to the latest version
+				this.commitDraft();
+				this.pane.backToLatest();
+				this.setMode("chat");
+				return;
+			}
+			this.draftEditor.handleInput(data);
 			this.tui.requestRender();
 			return;
 		}
@@ -114,39 +157,29 @@ export class NailOverlay implements Focusable {
 			else this.finish("discard");
 			return;
 		}
-		if ((matchesKey(data, "up") || matchesKey(data, "down")) && this.canScroll()) {
-			this.scroll = Math.max(0, this.scroll + (matchesKey(data, "up") ? 1 : -1));
+		if (this.mode === "chat") {
+			if (matchesKey(data, "up")) this.scroll++;
+			else if (matchesKey(data, "down")) this.scroll = Math.max(0, this.scroll - 1);
+			else if (matchesKey(data, "pageUp") || matchesKey(data, "pageDown")) return; // arrows scroll the transcript
+			else this.editor.handleInput(data); // typing goes into the input editor
 			this.tui.requestRender();
 			return;
 		}
-		if (matchesKey(data, "tab")) {
-			this.mode = this.mode === "editor" ? "bar" : "editor";
-			this.tui.requestRender();
-			return;
-		}
-		if (this.mode === "bar") {
-			if (matchesKey(data, "left")) this.selectedActionIndex = (this.selectedActionIndex + ACTIONS.length - 1) % ACTIONS.length;
-			else if (matchesKey(data, "right")) this.selectedActionIndex = (this.selectedActionIndex + 1) % ACTIONS.length;
+		if (this.mode === "actions") {
+			if (matchesKey(data, "left") || matchesKey(data, "up")) this.selectedActionIndex = (this.selectedActionIndex + ACTIONS.length - 1) % ACTIONS.length;
+			else if (matchesKey(data, "right") || matchesKey(data, "down")) this.selectedActionIndex = (this.selectedActionIndex + 1) % ACTIONS.length;
 			else if (matchesKey(data, "return")) {
 				const action = ACTIONS[this.selectedActionIndex]!.id;
 				if (action !== "discard" && !this.draft) return; // nothing to send yet
 				this.finish(action);
 				return;
-			}
+			} else return; // no text input in actions mode
 			this.tui.requestRender();
 			return;
 		}
-		this.editor.handleInput(data);
-		this.tui.requestRender();
 	}
 
-	// bar mode: always. editor mode: only when text is empty/single-line (else arrows move the cursor).
-	// Scrolling wins over the editor's prompt history and autocomplete-free single-line Up/Down.
-	private canScroll() {
-		return this.mode === "bar" || (this.editor.getLines().length <= 1 && !this.editor.isShowingAutocomplete());
-	}
-
-	invalidate() { this.editor.invalidate(); }
+	invalidate() { this.editor.invalidate(); this.draftEditor.invalidate(); }
 
 	render(width: number): string[] {
 		const theme = this.theme;
@@ -155,9 +188,12 @@ export class NailOverlay implements Focusable {
 		const paneW = width - colW - 1;
 		const inner = Math.max(20, colW - 4);
 		const rows = process.stdout.rows || 40;
+		const editDraft = this.draftEditing && !this.pane.isHistoryOpen;
+		let draftLines: string[] | undefined; // narrow: pre-rendered draft editor, sizes the chat column
+		if (!wide && editDraft) draftLines = this.draftEditor.render(width);
 		const bodyH = wide
 			? Math.max(8, Math.floor(rows * 0.85) - 12)
-			: Math.max(6, Math.floor(rows * 0.85) - 15 - (this.draft ? Math.min(10, this.draft.split("\n").length + 2) : 0));
+			: Math.max(6, Math.floor(rows * 0.85) - 15 - (draftLines ? draftLines.length : this.draft ? Math.min(10, this.draft.split("\n").length + 2) : 0));
 
 		const lines: string[] = [];
 		const renderMarkdown = (s: string) => new Markdown(s, 0, 0, getMarkdownTheme()).render(inner);
@@ -178,15 +214,19 @@ export class NailOverlay implements Focusable {
 
 		const out: string[] = [];
 		const more = [this.scroll < maxScroll ? "↑ more" : "", this.scroll > 0 ? "↓ more" : ""].filter(Boolean).join(" ");
-		const left = ` ${theme.fg("accent", "◆ nail")} ${theme.fg("dim", "· side chat, hidden from main agent")}`;
+		const left = ` ${theme.fg("accent", "◆ nail")} ${theme.fg(this.mode === "chat" ? "accent" : "dim", "· side chat, hidden from main agent")}`;
 		const right = more ? theme.fg("muted", more) + " " : "";
 		const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
 		out.push(theme.fg("accent", "─".repeat(width)));
 		out.push(visibleWidth(left) + visibleWidth(right) + 1 > width ? truncateToWidth(left, width - visibleWidth(right) - 1) + " " + right : left + " ".repeat(gap) + right);
 		const chat = view.map((l) => " " + truncateToWidth(l, inner + 2));
 		if (wide) {
-			this.pane.height = bodyH;
-			const pane = this.pane.render(paneW);
+			let pane: string[];
+			if (editDraft) pane = this.draftEditor.render(paneW);
+			else {
+				this.pane.height = bodyH;
+				pane = this.pane.render(paneW);
+			}
 			const sep = theme.fg("border", "│");
 			for (let i = 0; i < bodyH; i++) {
 				const l = truncateToWidth(chat[i] ?? "", colW);
@@ -197,20 +237,29 @@ export class NailOverlay implements Focusable {
 		if (!wide && this.pane.isHistoryOpen) {
 			this.pane.height = 8;
 			out.push(...this.pane.render(width));
+		} else if (!wide && draftLines) {
+			out.push(...draftLines);
 		} else if (!wide && this.draft) {
 			out.push(theme.fg("success", "─ draft prompt " + "─".repeat(Math.max(0, width - 15))));
 			out.push(...new Markdown(this.draft, 1, 0, getMarkdownTheme()).render(width - 2).slice(0, 10));
 		}
 		out.push(theme.fg("border", "─".repeat(width)));
+		// focus indicators: accent the focused region's border/title
+		this.editor.focused = this.focused && this.mode === "chat";
+		this.editor.borderColor = (s) => theme.fg(this.mode === "chat" ? "accent" : "border", s);
+		this.draftEditor.focused = this.focused && editDraft;
+		this.pane.focused = this.mode === "draft";
 		out.push(...this.editor.render(width));
 
 		const actionBar = ACTIONS.map((action, i) => {
 			const disabled = action.id !== "discard" && !this.draft;
 			const label = ` ${action.label} `;
-			if (this.mode === "bar" && i === this.selectedActionIndex) return theme.bg("selectedBg", disabled ? theme.fg("dim", label) : theme.fg("accent", label));
+			if (this.mode === "actions" && i === this.selectedActionIndex) return theme.bg("selectedBg", disabled ? theme.fg("dim", label) : theme.fg("accent", label));
 			return disabled ? theme.fg("dim", label) : theme.fg("muted", label);
 		}).join(" ");
-		const hint = `${this.pane.isHistoryOpen ? "↑/↓ select · enter preview · esc back · " : `↑/↓ scroll · ${wide ? "pgup/pgdn draft · " : ""}`}ctrl+o history · tab focus · ←/→ enter choose · esc ${this.busy ? "stop" : "discard"}`;
+		const hint = this.pane.isHistoryOpen
+			? `↑/↓ select · enter preview · esc back · ${HISTORY_KEY} close · tab cycle focus`
+			: `tab cycle focus (chat|draft|actions) · ${this.mode === "actions" ? "←/→ enter choose" : this.mode === "chat" ? "↑/↓ scroll, type to chat" : "↑/↓ edit draft"} · ${HISTORY_KEY} history · esc ${this.busy ? "stop" : this.mode === "draft" ? "back" : "discard"}`;
 		out.push(` ${actionBar}`);
 		out.push(" " + theme.fg("dim", truncateToWidth(hint, width - 2, "…")));
 		out.push(theme.fg("accent", "─".repeat(width)));

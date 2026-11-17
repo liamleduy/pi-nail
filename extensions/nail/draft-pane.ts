@@ -7,6 +7,7 @@ export interface DraftVersion { label: string; text: string; ts: number }
 /** Right-side pane: shows one draft version (scrollable) or the version history list. */
 export class DraftPane implements Component {
 	height = 10; // total rows incl. title; set by owner before render
+	focused = false; // set by owner: accent the title when the draft region has focus
 	private pinned: number | undefined; // previewed version index; undefined = latest
 	private historyOpen = false;
 	private selected = 0;
@@ -17,7 +18,7 @@ export class DraftPane implements Component {
 	get isHistoryOpen() { return this.historyOpen; }
 
 	/** Index of the version being shown. */
-	private get shown() { return Math.min(this.pinned ?? this.versions.length - 1, this.versions.length - 1); }
+	get shown() { return Math.min(this.pinned ?? this.versions.length - 1, this.versions.length - 1); }
 
 	toggleHistory() {
 		this.historyOpen = !this.historyOpen;
@@ -70,7 +71,7 @@ export class DraftPane implements Component {
 			title = `─ draft prompt${tag}${more ? ` ${more}` : ""}`;
 		}
 		while (body.length < bodyH) body.push("");
-		const head = theme.fg("success", truncateToWidth(title + " ", width, "…") );
+		const head = theme.fg(this.focused ? "accent" : "success", truncateToWidth(title + " ", width, "…") );
 		const out = [head + theme.fg("success", "─".repeat(Math.max(0, width - visibleWidth(head)))), ...body.slice(0, bodyH)];
 		return out.map((l) => truncateToWidth(l, width, "", true));
 	}

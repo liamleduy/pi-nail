@@ -5,7 +5,7 @@ import { Box, Markdown, Text } from "@earendil-works/pi-tui";
 import { type Block, NailOverlay, type Result } from "./overlay.ts";
 import { createCoachSession } from "./coach-session.ts";
 
-interface StoredSessionEntry { id: string; rough: string; transcript: Block[]; final?: string; action: string; ts: number }
+interface StoredSessionEntry { id: string; rough: string; transcript: Block[]; final?: string; versions?: { label: string; text: string; ts: number }[]; action: string; ts: number }
 
 // ponytail: unread set is in-memory, resets on reload. Persist via appendEntry("nail-read") if it matters.
 const readEntryIds = new Set<string>();
@@ -18,7 +18,7 @@ export default function (pi: ExtensionAPI) {
 		if (expanded) readEntryIds.add(entry.id);
 		const box = new Box(1, 1, (s) => theme.bg("customMessageBg", s));
 		const unread = readEntryIds.has(entry.id) ? "" : ` ${theme.fg("warning", "● unread")}`;
-		const head = `${theme.fg("accent", "◆ nail")}${unread} ${theme.fg("dim", `· ${entry.transcript.length} msgs · ${entry.action} · hidden from agent`)}`;
+		const head = `${theme.fg("accent", "◆ nail")}${unread} ${theme.fg("dim", `· ${entry.transcript.length} msgs · ${entry.versions ? `${entry.versions.length} versions · ` : ""}${entry.action} · hidden from agent`)}`;
 		box.addChild(new Text(head, 0, 0));
 		if (!expanded) {
 			box.addChild(new Text(theme.fg("dim", keyHint("app.tools.expand", "to expand")), 0, 0));
@@ -69,7 +69,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			pi.appendEntry<StoredSessionEntry>("nail", {
-				id: randomUUID(), rough: roughPrompt, transcript: result.transcript, final: result.final,
+				id: randomUUID(), rough: roughPrompt, transcript: result.transcript, final: result.final, versions: result.versions,
 				action: result.action, ts: Date.now(),
 			});
 			if (!result.final) return;

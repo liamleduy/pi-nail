@@ -1,10 +1,14 @@
 import type { AgentSession, Theme } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme, getSelectListTheme } from "@earendil-works/pi-coding-agent";
+import { DraftPane, type DraftVersion } from "./draft-pane.ts";
 import { Editor, type Focusable, Markdown, matchesKey, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
 export type Action = "send" | "chat" | "discard";
 export interface Block { role: "user" | "assistant" | "tool"; text: string }
-export interface Result { action: Action; final?: string; transcript: Block[] }
+export interface Result { action: Action; final?: string; transcript: Block[]; versions?: DraftVersion[] }
+
+const WIDE_MIN = 100; // overlay width at which the draft pane goes on the right
+const HISTORY_KEY = "ctrl+o"; // ctrl+h = backspace in legacy terminals, ctrl+v = paste
 
 const ACTIONS: { id: Action; label: string }[] = [
 	{ id: "send", label: "Send" },
@@ -16,6 +20,8 @@ export class NailOverlay implements Focusable {
 	focused = false;
 	blocks: Block[] = [];
 	draft = "";
+	versions: DraftVersion[];
+	private pane: DraftPane;
 	private streaming = "";
 	private busy = true;
 	private scroll = 0; // lines up from bottom
@@ -31,6 +37,8 @@ export class NailOverlay implements Focusable {
 		private done: (r: Result) => void,
 		roughPrompt: string,
 	) {
+		this.versions = [{ label: "rough", text: roughPrompt, ts: Date.now() }];
+		this.pane = new DraftPane(theme, this.versions);
 		this.editor = new Editor(tui, { borderColor: (s) => theme.fg("border", s), selectList: getSelectListTheme() });
 		this.editor.onSubmit = (text) => this.submit(text);
 		this.unsub = session.subscribe((e: any) => this.onEvent(e));
@@ -38,7 +46,13 @@ export class NailOverlay implements Focusable {
 	}
 
 	/** Called by index.ts when final_prompt fires. */
-	setDraft(draft: string) { this.draft = draft; this.tui.requestRender(); }
+	setDraft(draft: string) {
+		this.draft = draft;
+		if (this.versions[this.versions.length - 1]!.text !== draft) {
+			this.versions.push({ label: `v${this.versions.length}`, text: draft, ts: Date.now() });
+		}
+		this.tui.requestRender();
+	}
 
 	private onEvent(e: any) {
 		if (e.type === "message_update" && e.assistantMessageEvent?.type === "text_delta") {
@@ -73,10 +87,28 @@ export class NailOverlay implements Focusable {
 
 	private finish(action: Action) {
 		this.unsub();
-		this.done({ action, final: this.draft || undefined, transcript: this.blocks });
+		this.done({ action, final: this.draft || undefined, transcript: this.blocks, versions: this.versions });
 	}
 
 	handleInput(data: string): void {
+		if (matchesKey(data, HISTORY_KEY)) {
+			this.pane.toggleHistory();
+			this.tui.requestRender();
+			return;
+		}
+		if (this.pane.isHistoryOpen) {
+			if (matchesKey(data, "escape")) this.pane.backToLatest();
+			else if (matchesKey(data, "up")) this.pane.moveSelection(-1);
+			else if (matchesKey(data, "down")) this.pane.moveSelection(1);
+			else if (matchesKey(data, "return")) this.pane.previewSelected();
+			this.tui.requestRender();
+			return; // history view swallows input
+		}
+		if (matchesKey(data, "pageUp") || matchesKey(data, "pageDown")) {
+			this.pane.scrollBy(matchesKey(data, "pageUp") ? -5 : 5);
+			this.tui.requestRender();
+			return;
+		}
 		if (matchesKey(data, "escape")) {
 			if (this.busy) void this.session.abort();
 			else this.finish("discard");
@@ -118,9 +150,14 @@ export class NailOverlay implements Focusable {
 
 	render(width: number): string[] {
 		const theme = this.theme;
-		const inner = Math.max(20, width - 4);
+		const wide = width >= WIDE_MIN;
+		const colW = wide ? Math.floor((width - 1) * 0.55) : width;
+		const paneW = width - colW - 1;
+		const inner = Math.max(20, colW - 4);
 		const rows = process.stdout.rows || 40;
-		const bodyH = Math.max(6, Math.floor(rows * 0.85) - 15 - (this.draft ? Math.min(10, this.draft.split("\n").length + 2) : 0));
+		const bodyH = wide
+			? Math.max(8, Math.floor(rows * 0.85) - 12)
+			: Math.max(6, Math.floor(rows * 0.85) - 15 - (this.draft ? Math.min(10, this.draft.split("\n").length + 2) : 0));
 
 		const lines: string[] = [];
 		const renderMarkdown = (s: string) => new Markdown(s, 0, 0, getMarkdownTheme()).render(inner);
@@ -146,9 +183,21 @@ export class NailOverlay implements Focusable {
 		const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
 		out.push(theme.fg("accent", "─".repeat(width)));
 		out.push(visibleWidth(left) + visibleWidth(right) + 1 > width ? truncateToWidth(left, width - visibleWidth(right) - 1) + " " + right : left + " ".repeat(gap) + right);
-		out.push(...view.map((l) => " " + truncateToWidth(l, inner + 2)));
+		const chat = view.map((l) => " " + truncateToWidth(l, inner + 2));
+		if (wide) {
+			this.pane.height = bodyH;
+			const pane = this.pane.render(paneW);
+			const sep = theme.fg("border", "│");
+			for (let i = 0; i < bodyH; i++) {
+				const l = truncateToWidth(chat[i] ?? "", colW);
+				out.push(l + " ".repeat(Math.max(0, colW - visibleWidth(l))) + sep + (pane[i] ?? ""));
+			}
+		} else out.push(...chat);
 
-		if (this.draft) {
+		if (!wide && this.pane.isHistoryOpen) {
+			this.pane.height = 8;
+			out.push(...this.pane.render(width));
+		} else if (!wide && this.draft) {
 			out.push(theme.fg("success", "─ draft prompt " + "─".repeat(Math.max(0, width - 15))));
 			out.push(...new Markdown(this.draft, 1, 0, getMarkdownTheme()).render(width - 2).slice(0, 10));
 		}
@@ -161,7 +210,7 @@ export class NailOverlay implements Focusable {
 			if (this.mode === "bar" && i === this.selectedActionIndex) return theme.bg("selectedBg", disabled ? theme.fg("dim", label) : theme.fg("accent", label));
 			return disabled ? theme.fg("dim", label) : theme.fg("muted", label);
 		}).join(" ");
-		const hint = `↑/↓ scroll · tab focus · ←/→ enter choose · esc ${this.busy ? "stop" : "discard"}`;
+		const hint = `${this.pane.isHistoryOpen ? "↑/↓ select · enter preview · esc back · " : `↑/↓ scroll · ${wide ? "pgup/pgdn draft · " : ""}`}ctrl+o history · tab focus · ←/→ enter choose · esc ${this.busy ? "stop" : "discard"}`;
 		out.push(` ${actionBar}`);
 		out.push(" " + theme.fg("dim", truncateToWidth(hint, width - 2, "…")));
 		out.push(theme.fg("accent", "─".repeat(width)));

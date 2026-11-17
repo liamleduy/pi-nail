@@ -82,8 +82,11 @@ export class NailOverlay implements Focusable {
 			else this.finish("discard");
 			return;
 		}
-		if (matchesKey(data, "pageUp")) { this.scroll += 8; this.tui.requestRender(); return; }
-		if (matchesKey(data, "pageDown")) { this.scroll = Math.max(0, this.scroll - 8); this.tui.requestRender(); return; }
+		if ((matchesKey(data, "up") || matchesKey(data, "down")) && this.canScroll()) {
+			this.scroll = Math.max(0, this.scroll + (matchesKey(data, "up") ? 1 : -1));
+			this.tui.requestRender();
+			return;
+		}
 		if (matchesKey(data, "tab")) {
 			this.mode = this.mode === "editor" ? "bar" : "editor";
 			this.tui.requestRender();
@@ -105,13 +108,19 @@ export class NailOverlay implements Focusable {
 		this.tui.requestRender();
 	}
 
+	// bar mode: always. editor mode: only when text is empty/single-line (else arrows move the cursor).
+	// Scrolling wins over the editor's prompt history and autocomplete-free single-line Up/Down.
+	private canScroll() {
+		return this.mode === "bar" || (this.editor.getLines().length <= 1 && !this.editor.isShowingAutocomplete());
+	}
+
 	invalidate() { this.editor.invalidate(); }
 
 	render(width: number): string[] {
 		const theme = this.theme;
 		const inner = Math.max(20, width - 4);
 		const rows = process.stdout.rows || 40;
-		const bodyH = Math.max(6, Math.floor(rows * 0.85) - 14 - (this.draft ? Math.min(10, this.draft.split("\n").length + 2) : 0));
+		const bodyH = Math.max(6, Math.floor(rows * 0.85) - 15 - (this.draft ? Math.min(10, this.draft.split("\n").length + 2) : 0));
 
 		const lines: string[] = [];
 		const renderMarkdown = (s: string) => new Markdown(s, 0, 0, getMarkdownTheme()).render(inner);
@@ -124,19 +133,26 @@ export class NailOverlay implements Focusable {
 		if (this.streaming) lines.push(...renderMarkdown(this.streaming));
 		else if (this.busy) lines.push(theme.fg("dim", "  … thinking"));
 
-		const end = Math.max(0, lines.length - this.scroll);
+		const maxScroll = Math.max(0, lines.length - bodyH);
+		this.scroll = Math.min(Math.max(0, this.scroll), maxScroll);
+		const end = lines.length - this.scroll;
 		const view = lines.slice(Math.max(0, end - bodyH), end);
 		while (view.length < bodyH) view.push("");
 
 		const out: string[] = [];
-		const title = ` ◆ nail ${theme.fg("dim", "· side chat, hidden from main agent")} `;
-		out.push(theme.fg("accent", "─".repeat(width)), title);
+		const more = [this.scroll < maxScroll ? "↑ more" : "", this.scroll > 0 ? "↓ more" : ""].filter(Boolean).join(" ");
+		const left = ` ${theme.fg("accent", "◆ nail")} ${theme.fg("dim", "· side chat, hidden from main agent")}`;
+		const right = more ? theme.fg("muted", more) + " " : "";
+		const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
+		out.push(theme.fg("accent", "─".repeat(width)));
+		out.push(visibleWidth(left) + visibleWidth(right) + 1 > width ? truncateToWidth(left, width - visibleWidth(right) - 1) + " " + right : left + " ".repeat(gap) + right);
 		out.push(...view.map((l) => " " + truncateToWidth(l, inner + 2)));
 
 		if (this.draft) {
 			out.push(theme.fg("success", "─ draft prompt " + "─".repeat(Math.max(0, width - 15))));
 			out.push(...new Markdown(this.draft, 1, 0, getMarkdownTheme()).render(width - 2).slice(0, 10));
 		}
+		out.push(theme.fg("border", "─".repeat(width)));
 		out.push(...this.editor.render(width));
 
 		const actionBar = ACTIONS.map((action, i) => {
@@ -145,8 +161,9 @@ export class NailOverlay implements Focusable {
 			if (this.mode === "bar" && i === this.selectedActionIndex) return theme.bg("selectedBg", disabled ? theme.fg("dim", label) : theme.fg("accent", label));
 			return disabled ? theme.fg("dim", label) : theme.fg("muted", label);
 		}).join(" ");
-		const hint = this.busy ? "esc stop" : "esc discard";
-		out.push(` ${actionBar}   ${theme.fg("dim", `tab focus · ←/→ enter choose · pgup/pgdn scroll · ${hint}`)}`);
+		const hint = `↑/↓ scroll · tab focus · ←/→ enter choose · esc ${this.busy ? "stop" : "discard"}`;
+		out.push(` ${actionBar}`);
+		out.push(" " + theme.fg("dim", truncateToWidth(hint, width - 2, "…")));
 		out.push(theme.fg("accent", "─".repeat(width)));
 		// solid background: pad every line so the main chat does not bleed through
 		return out.map((l) => truncateToWidth(l, width) + " ".repeat(Math.max(0, width - visibleWidth(l))));

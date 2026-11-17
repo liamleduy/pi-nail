@@ -1,4 +1,4 @@
-import type { AgentSession, Theme } from "@earendil-works/pi-coding-agent";
+import type { AgentSession, Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { getMarkdownTheme, getSelectListTheme } from "@earendil-works/pi-coding-agent";
 import { DraftPane, type DraftVersion } from "./draft-pane.ts";
 import { Editor, type Focusable, Markdown, matchesKey, type TUI, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
@@ -12,6 +12,7 @@ const HISTORY_KEY = "ctrl+o"; // ctrl+h = backspace in legacy terminals, ctrl+v 
 
 type Mode = "chat" | "draft" | "actions"; // tab cycles chat → draft → actions → chat
 const MODES: Mode[] = ["chat", "draft", "actions"];
+const MODE_RIM: Record<Mode, ThemeColor> = { chat: "accent", draft: "success", actions: "muted" };
 
 const ACTIONS: { id: Action; label: string }[] = [
 	{ id: "send", label: "Send" },
@@ -96,7 +97,7 @@ export class NailOverlay implements Focusable {
 	/** Load the shown draft version into the draft editor for in-place editing. */
 	private enterDraft() {
 		this.draftEditIndex = Math.min(this.pane.shown, this.versions.length - 1);
-		this.draftEditor.setText(this.versions[this.draftEditIndex]?.text ?? "");
+		this.draftEditor.setText(this.versions[this.draftEditIndex]?.text ?? "", "start");
 		this.draftEditing = true;
 	}
 
@@ -179,6 +180,11 @@ export class NailOverlay implements Focusable {
 		}
 	}
 
+	/** Rim color for the overlay's top/bottom border lines: the focused mode's color, or neutral when unfocused. */
+	private rim(width: number) {
+		return this.theme.fg(this.focused ? MODE_RIM[this.mode] : "border", "─".repeat(width));
+	}
+
 	invalidate() { this.editor.invalidate(); this.draftEditor.invalidate(); }
 
 	render(width: number): string[] {
@@ -217,7 +223,7 @@ export class NailOverlay implements Focusable {
 		const left = ` ${theme.fg("accent", "◆ nail")} ${theme.fg(this.mode === "chat" ? "accent" : "dim", "· side chat, hidden from main agent")}`;
 		const right = more ? theme.fg("muted", more) + " " : "";
 		const gap = Math.max(1, width - visibleWidth(left) - visibleWidth(right));
-		out.push(theme.fg("accent", "─".repeat(width)));
+		out.push(this.rim(width));
 		out.push(visibleWidth(left) + visibleWidth(right) + 1 > width ? truncateToWidth(left, width - visibleWidth(right) - 1) + " " + right : left + " ".repeat(gap) + right);
 		const chat = view.map((l) => " " + truncateToWidth(l, inner + 2));
 		if (wide) {
@@ -243,7 +249,7 @@ export class NailOverlay implements Focusable {
 			out.push(theme.fg("success", "─ draft prompt " + "─".repeat(Math.max(0, width - 15))));
 			out.push(...new Markdown(this.draft, 1, 0, getMarkdownTheme()).render(width - 2).slice(0, 10));
 		}
-		out.push(theme.fg("border", "─".repeat(width)));
+		out.push(this.rim(width));
 		// focus indicators: accent the focused region's border/title
 		this.editor.focused = this.focused && this.mode === "chat";
 		this.editor.borderColor = (s) => theme.fg(this.mode === "chat" ? "accent" : "border", s);
@@ -262,7 +268,7 @@ export class NailOverlay implements Focusable {
 			: `tab cycle focus (chat|draft|actions) · ${this.mode === "actions" ? "←/→ enter choose" : this.mode === "chat" ? "↑/↓ scroll, type to chat" : "↑/↓ edit draft"} · ${HISTORY_KEY} history · esc ${this.busy ? "stop" : this.mode === "draft" ? "back" : "discard"}`;
 		out.push(` ${actionBar}`);
 		out.push(" " + theme.fg("dim", truncateToWidth(hint, width - 2, "…")));
-		out.push(theme.fg("accent", "─".repeat(width)));
+		out.push(this.rim(width));
 		// solid background: pad every line so the main chat does not bleed through
 		return out.map((l) => truncateToWidth(l, width) + " ".repeat(Math.max(0, width - visibleWidth(l))));
 	}
